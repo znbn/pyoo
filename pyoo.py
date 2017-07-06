@@ -1,7 +1,7 @@
 """
 PyOO - Pythonic interface to Apache OpenOffice API (UNO)
 
-Copyright (c) 2014 Seznam.cz, a.s.
+Copyright (c) 2016 Seznam.cz, a.s.
 
 """
 
@@ -1199,14 +1199,14 @@ class CellRange(object):
         return cursor.get_target(address.row, address.col,
                                  address.row_count, address.col_count)
 
-    def _clean_value(self, value):
-        """
-        Validates and converts value before assigning it to a cell.
-        """
-        if value is None:
-            return value
+    def _convert(self, value):
         if isinstance(value, numbers.Real):
-            return value
+            # OpenOffices raises RuntimeError for integers outside of
+            # 32-bit integers
+            if -2147483648 <= value <= 2147483647:
+                return value
+            else:
+                return float(value)
         if isinstance(value, string_types):
             return value
         if isinstance(value, datetime.date):
@@ -1215,21 +1215,21 @@ class CellRange(object):
             return self.sheet.document.time_to_number(value)
         return text_type(value)
 
+    def _clean_value(self, value):
+        """
+        Validates and converts value before assigning it to a cell.
+        """
+        if value is None:
+            return value
+        return self._convert(value)
+
     def _clean_formula(self, value):
         """
         Validates and converts formula before assigning it to a cell.
         """
         if value is None:
             return ''
-        if isinstance(value, numbers.Real):
-            return value
-        if isinstance(value, string_types):
-            return value
-        if isinstance(value, datetime.date):
-            return self.sheet.document.date_to_number(value)
-        if isinstance(value, datetime.time):
-            return self.sheet.document.time_to_number(value)
-        return text_type(value)
+        return self._convert(value)
 
 
 class Cell(CellRange):
@@ -1662,15 +1662,25 @@ class SpreadsheetDocument(_UnoProxy):
     Spreadsheet document.
     """
 
-    def save(self, path, filter_name=None):
+    def save(self, path=None, filter_name=None):
         """
         Saves this document to a local file system.
+
+        The optional first argument defaults to the document's path.
 
         Accept optional second  argument which defines type of
         the saved file. Use one of FILTER_* constants or see list of
         available filters at http://wakka.net/archives/7 or
         http://www.oooforum.org/forum/viewtopic.phtml?t=71294.
         """
+
+        if path is None:
+            try:
+                self._target.store()
+            except _IOException as e:
+                raise IOError(e.Message)
+            return
+
         # UNO requires absolute paths
         url = uno.systemPathToFileUrl(os.path.abspath(path))
         if filter_name:
@@ -1785,6 +1795,11 @@ def _get_connection_url(hostname, port, pipe=None):
         conn = 'socket,host=%s,port=%d' % (hostname, port)
     return 'uno:%s;urp;StarOffice.ComponentContext' % conn
 
+def _get_remote_context(resolver, url):
+    try:
+        return resolver.resolve(url)
+    except _NoConnectException:
+        raise IOError(resolver, url)
 
 class Desktop(_UnoProxy):
     """
@@ -1800,10 +1815,10 @@ class Desktop(_UnoProxy):
 
     def __init__(self, hostname='localhost', port=2002, pipe=None):
         url = _get_connection_url(hostname, port, pipe)
-        local_context = uno.getComponentContext()
-        resolver = local_context.getServiceManager().createInstanceWithContext('com.sun.star.bridge.UnoUrlResolver', local_context)
-        remote_context = resolver.resolve(url)
-        desktop = remote_context.getServiceManager().createInstanceWithContext("com.sun.star.frame.Desktop", remote_context)
+        self.local_context = uno.getComponentContext()
+        resolver = self.local_context.getServiceManager().createInstanceWithContext('com.sun.star.bridge.UnoUrlResolver', self.local_context)
+        self.remote_context = _get_remote_context(resolver, url)
+        desktop = self.remote_context.getServiceManager().createInstanceWithContext('com.sun.star.frame.Desktop', self.remote_context)
         super(Desktop, self).__init__(desktop)
 
     def create_spreadsheet(self):
